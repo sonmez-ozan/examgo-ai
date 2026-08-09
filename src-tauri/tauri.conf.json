@@ -23,11 +23,14 @@
   },
   "bundle": {
     "active": true,
-    "targets": "nsis",
+    "targets": "all",
     "windows": {
       "nsis": {
         "installerHooks": "./windows/hooks.nsi"
       }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15"
     },
     "icon": [
       "icons/32x32.png",

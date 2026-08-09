@@ -512,6 +512,46 @@ fn run_hidden(program: &str, args: &[&str]) -> std::io::Result<std::process::Out
     cmd.output()
 }
 
+/// Kill any already-running Ollama process so a location/config change takes
+/// effect on the next start. Best-effort — failures are ignored, since the
+/// process may simply not be running.
+fn kill_ollama() {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = run_hidden("taskkill", &["/IM", "ollama.exe", "/F"]);
+        let _ = run_hidden("taskkill", &["/IM", "ollama app.exe", "/F"]);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = run_hidden("pkill", &["-x", "ollama"]);
+        let _ = run_hidden("pkill", &["-x", "Ollama"]);
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = run_hidden("pkill", &["-x", "ollama"]);
+    }
+}
+
+/// Best-effort persistence of OLLAMA_MODELS so Ollama's own autostart (set
+/// up by its installer, outside our control) also uses the right folder —
+/// belt-and-suspenders on top of us always passing the env var explicitly
+/// whenever *we* spawn `ollama serve` ourselves.
+fn persist_models_env(dir_str: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = run_hidden("setx", &["OLLAMA_MODELS", dir_str]);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Session-scoped: applies to GUI-launched apps (including Ollama's
+        // own menu-bar autostart) for the current login session. Does not
+        // survive a reboot on its own, but our app re-asserts it via
+        // ensure_models_location() on every launch, and we always pass the
+        // env var directly when we spawn `ollama serve` ourselves regardless.
+        let _ = run_hidden("launchctl", &["setenv", "OLLAMA_MODELS", dir_str]);
+    }
+}
+
 /// Make ExamGo AI's own data folder the home of all AI models.
 /// Runs once (marker file): stops any running Ollama, moves already-downloaded
 /// models over, and persists OLLAMA_MODELS for every future Ollama start.
@@ -527,16 +567,16 @@ async fn ensure_models_location(
     emit("Moving AI model storage into the ExamGo AI folder (one-time)…");
 
     // stop any running Ollama so the new location takes effect
-    let _ = tauri::async_runtime::spawn_blocking(|| {
-        let _ = run_hidden("taskkill", &["/IM", "ollama.exe", "/F"]);
-        let _ = run_hidden("taskkill", &["/IM", "ollama app.exe", "/F"]);
-    })
-    .await;
+    let _ = tauri::async_runtime::spawn_blocking(kill_ollama).await;
     sleep_ms(1500).await;
 
-    // move any previously downloaded models so they don't re-download
-    if let Ok(profile) = std::env::var("USERPROFILE") {
-        let old = PathBuf::from(profile).join(".ollama").join("models");
+    // move any previously downloaded models so they don't re-download.
+    // Ollama uses ~/.ollama on every OS; HOME covers macOS/Linux, USERPROFILE covers Windows.
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok();
+    if let Some(home) = home {
+        let old = PathBuf::from(home).join(".ollama").join("models");
         for sub in ["blobs", "manifests"] {
             let from = old.join(sub);
             let to = dir.join(sub);
@@ -548,23 +588,35 @@ async fn ensure_models_location(
 
     // persist for future Ollama starts (autostart, manual, ours)
     let dir_str = dir.to_string_lossy().to_string();
-    let _ = tauri::async_runtime::spawn_blocking(move || {
-        run_hidden("setx", &["OLLAMA_MODELS", &dir_str])
-    })
-    .await;
+    let _ = tauri::async_runtime::spawn_blocking(move || persist_models_env(&dir_str)).await;
 
     fs::write(&marker, b"1").map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
 fn find_ollama_exe() -> Option<PathBuf> {
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        let p = PathBuf::from(local)
-            .join("Programs")
-            .join("Ollama")
-            .join("ollama.exe");
-        if p.exists() {
-            return Some(p);
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let p = PathBuf::from(local)
+                .join("Programs")
+                .join("Ollama")
+                .join("ollama.exe");
+            if p.exists() {
+                return Some(p);
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // GUI-launched apps don't reliably inherit a shell's PATH additions
+        // (e.g. Homebrew's /opt/homebrew/bin), so check the common install
+        // locations directly before falling back to a PATH lookup.
+        for candidate in ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"] {
+            let p = PathBuf::from(candidate);
+            if p.exists() {
+                return Some(p);
+            }
         }
     }
     let on_path = std::process::Command::new("ollama")
@@ -651,6 +703,76 @@ async fn local_ai_status(app: tauri::AppHandle) -> Result<LocalAiStatus, String>
 }
 
 #[tauri::command]
+/// Install Ollama automatically where a reliable, scriptable path exists;
+/// otherwise fail with clear manual-install instructions rather than doing
+/// something fragile (e.g. downloading and running an unsigned installer).
+async fn install_ollama(emit: &impl Fn(&str)) -> Result<(), String> {
+    emit("Installing Ollama (one-time, ~700 MB)… this can take a few minutes.");
+
+    #[cfg(target_os = "windows")]
+    let status = tauri::async_runtime::spawn_blocking(|| {
+        std::process::Command::new("winget")
+            .args([
+                "install",
+                "-e",
+                "--id",
+                "Ollama.Ollama",
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+            ])
+            .status()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("could not run winget: {e}"))?;
+
+    #[cfg(target_os = "macos")]
+    let status = {
+        let have_brew = std::process::Command::new("sh")
+            .args(["-c", "command -v brew"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !have_brew {
+            return Err(
+                "Homebrew isn't installed, so Ollama can't be installed automatically. \
+Install Homebrew (brew.sh), or install Ollama yourself from ollama.com/download, \
+then try again."
+                    .into(),
+            );
+        }
+        tauri::async_runtime::spawn_blocking(|| {
+            std::process::Command::new("brew")
+                .args(["install", "ollama"])
+                .status()
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("could not run brew: {e}"))?
+    };
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let status = tauri::async_runtime::spawn_blocking(|| {
+        std::process::Command::new("sh")
+            .args(["-c", "curl -fsSL https://ollama.com/install.sh | sh"])
+            .status()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("could not run the Ollama install script: {e}"))?;
+
+    if !status.success() && find_ollama_exe().is_none() {
+        return Err(
+            "Ollama installation failed — install it manually from ollama.com/download \
+and try again"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn setup_local_ai(app: tauri::AppHandle, model: Option<String>) -> Result<String, String> {
     use tauri::Emitter;
     let emit = |msg: &str| {
@@ -671,30 +793,7 @@ e.g. qwen3:4b"
 
     // 1. install Ollama if missing
     if find_ollama_exe().is_none() {
-        emit("Installing Ollama (one-time, ~700 MB)… this can take a few minutes.");
-        let status = tauri::async_runtime::spawn_blocking(|| {
-            std::process::Command::new("winget")
-                .args([
-                    "install",
-                    "-e",
-                    "--id",
-                    "Ollama.Ollama",
-                    "--silent",
-                    "--accept-package-agreements",
-                    "--accept-source-agreements",
-                ])
-                .status()
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("could not run winget: {e}"))?;
-        if !status.success() && find_ollama_exe().is_none() {
-            return Err(
-                "Ollama installation failed — install it manually from ollama.com/download \
-and try again"
-                    .into(),
-            );
-        }
+        install_ollama(&emit).await?;
     }
 
     // 1.5 make sure models live in the ExamGo AI folder
@@ -794,7 +893,7 @@ fn open_models_folder(app: tauri::AppHandle) -> Result<String, String> {
         .to_string_lossy()
         .trim_start_matches(r"\\?\")
         .to_string();
-    #[cfg(windows)]
+    #[cfg(target_os = "windows")]
     {
         // Goes through the OS shell association (same path a double-click
         // takes) instead of invoking explorer.exe's own argv parsing, which
@@ -806,9 +905,19 @@ fn open_models_folder(app: tauri::AppHandle) -> Result<String, String> {
         cmd.spawn()
             .map_err(|e| format!("could not open folder ({real_str}): {e}"))?;
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        let _ = &real_str;
+        std::process::Command::new("open")
+            .arg(&real_str)
+            .spawn()
+            .map_err(|e| format!("could not open folder ({real_str}): {e}"))?;
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&real_str)
+            .spawn()
+            .map_err(|e| format!("could not open folder ({real_str}): {e}"))?;
     }
     Ok(real_str)
 }
