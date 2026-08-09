@@ -700,6 +700,7 @@ Guidelines:
 - All 4 answer options must be plausible and similar in length and style. Wrong answers should reflect realistic misconceptions or common mistakes, never be obviously silly or off-topic.
 - Vary which position (0-3) holds the correct answer across questions so the pattern isn't predictable — do not favor any one letter.
 - Never repeat the same question wording or scenario twice in the set.
+- Do NOT prefix any answer or explanation with its own letter or number (no "A.", "B)", "C:", "3.", etc.) — the app already displays that label automatically. Write only the content itself.
 - ${guidance}
 
 Respond with ONLY a JSON array — no markdown fences, no commentary, no text before or after the array. Each element must be an object with exactly these fields:

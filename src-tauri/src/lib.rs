@@ -230,6 +230,9 @@ off-topic.\n\
 - Vary which position (0-3) holds the correct answer across questions so the pattern isn't \
 predictable — do not favor any one letter.\n\
 - Never repeat the same question wording or scenario twice in the set.\n\
+- Do NOT prefix any answer or explanation with its own letter or number \
+(no \"A.\", \"B)\", \"C:\", \"3.\", etc.) — the app already displays that label \
+automatically. Write only the content itself.\n\
 - {guidance}\n\n\
 Respond with ONLY a JSON array, no markdown fences, no commentary, no text before or after \
 the array. Each element must be an object with exactly these fields:\n\
@@ -299,11 +302,47 @@ fn extract_json_array(text: &str) -> Result<Vec<Question>, String> {
         .filter(|q: &Question| {
             q.answers.len() == 4 && q.explanations.len() == 4 && q.correct_index < 4
         })
+        .map(|mut q| {
+            q.answers = q.answers.iter().map(|a| strip_label_prefix(a)).collect();
+            q.explanations = q.explanations.iter().map(|e| strip_label_prefix(e)).collect();
+            q
+        })
         .collect();
     if questions.is_empty() {
         return Err("AI response contained no valid, complete questions".into());
     }
     Ok(questions)
+}
+
+/// Strip a redundant leading letter-label some models add to answers/
+/// explanations (e.g. "B provides connectivity...", "C. is a physical...")
+/// even when told not to — the app already renders that letter itself.
+/// Only strips B/C/D as a bare leading word (never legitimate English), or
+/// any letter A-D followed by punctuation (unambiguous label marker either
+/// way) — never a bare leading "A " alone, since that's commonly a real
+/// article ("A virtual network is...") and stripping it would be wrong.
+fn strip_label_prefix(s: &str) -> String {
+    let trimmed = s.trim_start();
+    let mut chars = trimmed.char_indices();
+    let Some((_, c)) = chars.next() else {
+        return s.to_string();
+    };
+    let upper = c.to_ascii_uppercase();
+    if !('A'..='D').contains(&upper) {
+        return s.to_string();
+    }
+    let rest = &trimmed[c.len_utf8()..];
+    let mut rest_chars = rest.chars();
+    if let Some(next_c) = rest_chars.next() {
+        if matches!(next_c, '.' | ':' | ')' | '-' | '\u{2013}' | '\u{2014}') {
+            let after_punct = &rest[next_c.len_utf8()..];
+            return after_punct.trim_start().to_string();
+        }
+    }
+    if upper != 'A' && rest.starts_with(char::is_whitespace) {
+        return rest.trim_start().to_string();
+    }
+    s.to_string()
 }
 
 fn http() -> Result<reqwest::Client, String> {
