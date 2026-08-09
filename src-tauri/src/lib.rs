@@ -618,6 +618,27 @@ fn find_ollama_exe() -> Option<PathBuf> {
                 return Some(p);
             }
         }
+        // Installed via direct download (no Homebrew) — the CLI binary lives
+        // inside the app bundle rather than on a standard PATH. Don't assume
+        // the exact internal layout; search for it.
+        if let Ok(out) = std::process::Command::new("find")
+            .args([
+                "/Applications/Ollama.app",
+                "-type",
+                "f",
+                "-name",
+                "ollama",
+                "-perm",
+                "+111",
+            ])
+            .output()
+        {
+            if let Some(first) = String::from_utf8_lossy(&out.stdout).lines().next() {
+                if !first.is_empty() {
+                    return Some(PathBuf::from(first));
+                }
+            }
+        }
     }
     let on_path = std::process::Command::new("ollama")
         .arg("--version")
@@ -702,7 +723,6 @@ async fn local_ai_status(app: tauri::AppHandle) -> Result<LocalAiStatus, String>
     })
 }
 
-#[tauri::command]
 /// Install Ollama automatically where a reliable, scriptable path exists;
 /// otherwise fail with clear manual-install instructions rather than doing
 /// something fragile (e.g. downloading and running an unsigned installer).
@@ -734,22 +754,36 @@ async fn install_ollama(emit: &impl Fn(&str)) -> Result<(), String> {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        if !have_brew {
-            return Err(
-                "Homebrew isn't installed, so Ollama can't be installed automatically. \
-Install Homebrew (brew.sh), or install Ollama yourself from ollama.com/download, \
-then try again."
-                    .into(),
-            );
+        if have_brew {
+            tauri::async_runtime::spawn_blocking(|| {
+                std::process::Command::new("brew")
+                    .args(["install", "ollama"])
+                    .status()
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("could not run brew: {e}"))?
+        } else {
+            // No Homebrew — download Ollama's official app bundle directly
+            // and unpack it into /Applications, same "no manual steps"
+            // experience as the Windows winget path.
+            emit("No Homebrew found — downloading Ollama directly from ollama.com…");
+            tauri::async_runtime::spawn_blocking(|| {
+                std::process::Command::new("sh")
+                    .args([
+                        "-c",
+                        "set -e; \
+                         tmp=$(mktemp -d); \
+                         curl -fsSL -o \"$tmp/Ollama-darwin.zip\" https://ollama.com/download/Ollama-darwin.zip; \
+                         ditto -xk \"$tmp/Ollama-darwin.zip\" /Applications/; \
+                         rm -rf \"$tmp\"",
+                    ])
+                    .status()
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| format!("could not download Ollama: {e}"))?
         }
-        tauri::async_runtime::spawn_blocking(|| {
-            std::process::Command::new("brew")
-                .args(["install", "ollama"])
-                .status()
-        })
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| format!("could not run brew: {e}"))?
     };
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
