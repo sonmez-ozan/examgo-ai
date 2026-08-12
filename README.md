@@ -4,6 +4,31 @@ A free desktop app for generating and practicing certification-exam quizzes with
 
 ![Home](screenshots/home.webp)
 
+## Download
+
+<table>
+<tr>
+<td width="50%" align="center">
+
+### 🪟 Windows
+
+Installer (.exe), sets everything up for you.
+
+<a href="https://github.com/sonmez-ozan/examgo-ai/releases/latest/download/ExamGo.AI_0.1.2_x64-setup.exe"><img alt="Download for Windows" src="https://img.shields.io/badge/Download-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white"></a>
+
+</td>
+<td width="50%" align="center">
+
+### 🍎 macOS
+
+Universal disk image (.dmg), runs on Intel and Apple Silicon.
+
+<a href="https://github.com/sonmez-ozan/examgo-ai/releases/latest/download/ExamGo.AI_0.1.2_universal.dmg"><img alt="Download for macOS" src="https://img.shields.io/badge/Download-macOS-000000?style=for-the-badge&logo=apple&logoColor=white"></a>
+
+</td>
+</tr>
+</table>
+
 ## Features
 
 - **Local AI generation** — powered by [Ollama](https://ollama.com), running completely offline after a one-time setup. Pick from Gemma, Qwen, Llama, or Mistral models, or run several at once and split the question count between them.
