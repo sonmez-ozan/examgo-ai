@@ -2,7 +2,7 @@ const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
-const views = ["home", "generate", "import", "quiz", "results", "settings", "about"];
+const views = ["home", "generate", "import", "quiz", "results", "settings", "about", "weak-home"];
 
 let quiz = null; // { set, index, correctCount }
 let setupRunning = false;
@@ -556,13 +556,83 @@ async function startQuizFromSet(name) {
 }
 
 function startQuiz(set) {
-  quiz = { set, index: 0, correctCount: 0 };
-  $("quiz-title").textContent = set.name;
-  $("quiz-exam").textContent = set.exam;
+  quiz = {
+    mode: "normal",
+    title: set.name,
+    subtitle: set.exam,
+    questions: set.questions.map((q, i) => ({
+      question: q,
+      setName: set.name,
+      questionIndex: i,
+    })),
+    index: 0,
+    correctCount: 0,
+    wrongIndices: [],
+    set, // kept for the attempt-history panel + record_attempt
+  };
+  $("quiz-title").textContent = quiz.title;
+  $("quiz-exam").textContent = quiz.subtitle;
+  $("quiz-history-panel").classList.remove("hidden");
+  $("quiz-reset-link").classList.add("hidden");
   renderQuizHistory();
   showView("quiz");
   renderQuestion();
 }
+
+function startReviewQuiz(weakQuestions) {
+  quiz = {
+    mode: "review",
+    title: "Strengthen Your Knowledge",
+    subtitle: `${weakQuestions.length} question${weakQuestions.length === 1 ? "" : "s"} you've missed before, mixed across every exam`,
+    questions: weakQuestions.map((wq) => ({
+      question: wq.question,
+      setName: wq.set_name,
+      questionIndex: wq.index,
+    })),
+    index: 0,
+    correctCount: 0,
+    wrongIndices: [],
+  };
+  $("quiz-title").textContent = quiz.title;
+  $("quiz-exam").textContent = quiz.subtitle;
+  $("quiz-history-panel").classList.add("hidden");
+  $("quiz-reset-link").classList.remove("hidden");
+  showView("quiz");
+  renderQuestion();
+}
+
+async function openWeakReview() {
+  try {
+    const weakQuestions = await invoke("get_weak_quiz");
+    if (weakQuestions.length === 0) {
+      showView("weak-home");
+      return;
+    }
+    startReviewQuiz(weakQuestions);
+  } catch (e) {
+    alert(String(e));
+  }
+}
+
+async function resetWeakQuestions() {
+  if (
+    !confirm(
+      "Reset all wrong-question history? This clears every question from Strengthen Your Knowledge — it can't be undone.",
+    )
+  ) {
+    return;
+  }
+  try {
+    await invoke("reset_weak_questions");
+    refreshWeakBadge();
+    showView("home");
+  } catch (e) {
+    alert(String(e));
+  }
+}
+
+$("weak-nav-btn").addEventListener("click", openWeakReview);
+$("quiz-reset-link").addEventListener("click", resetWeakQuestions);
 
 function renderQuizHistory() {
   const list = $("quiz-history-list");
@@ -584,9 +654,9 @@ function renderQuizHistory() {
 }
 
 function renderQuestion() {
-  const { set, index } = quiz;
-  const q = set.questions[index];
-  $("quiz-progress").textContent = `Question ${index + 1} / ${set.questions.length}`;
+  const { questions, index } = quiz;
+  const q = questions[index].question;
+  $("quiz-progress").textContent = `Question ${index + 1} / ${questions.length}`;
   $("quiz-question").textContent = q.question;
 
   const answersBox = $("quiz-answers");
@@ -603,11 +673,16 @@ function renderQuestion() {
   $("quiz-explanations").classList.add("hidden");
   $("quiz-explanations").innerHTML = "";
   $("quiz-next").classList.add("hidden");
+  const dismissBtn = $("quiz-dismiss");
+  dismissBtn.classList.add("hidden");
+  dismissBtn.disabled = false;
+  dismissBtn.textContent = "Don't show this question again";
 }
 
 function answerChosen(chosen) {
-  const { set, index } = quiz;
-  const q = set.questions[index];
+  const { questions, index } = quiz;
+  const entry = questions[index];
+  const q = entry.question;
   const correct = q.correct_index;
   const buttons = [...$("quiz-answers").querySelectorAll(".answer-btn")];
   const letters = ["A", "B", "C", "D"];
@@ -615,7 +690,11 @@ function answerChosen(chosen) {
   buttons.forEach((b) => (b.disabled = true));
   buttons[correct].classList.add("correct");
   if (chosen !== correct) buttons[chosen].classList.add("wrong");
-  if (chosen === correct) quiz.correctCount++;
+  if (chosen === correct) {
+    quiz.correctCount++;
+  } else if (quiz.mode === "normal") {
+    quiz.wrongIndices.push(entry.questionIndex);
+  }
 
   const box = $("quiz-explanations");
   box.innerHTML = "";
@@ -637,15 +716,34 @@ function answerChosen(chosen) {
   });
   box.classList.remove("hidden");
 
+  if (quiz.mode === "review") {
+    const dismissBtn = $("quiz-dismiss");
+    dismissBtn.classList.remove("hidden");
+    dismissBtn.onclick = () => dismissCurrentReviewQuestion(entry.setName, entry.questionIndex);
+  }
+
   const next = $("quiz-next");
   next.textContent =
-    index + 1 < set.questions.length ? "Next question →" : "See results →";
+    index + 1 < questions.length ? "Next question →" : "See results →";
   next.classList.remove("hidden");
+}
+
+async function dismissCurrentReviewQuestion(setName, questionIndex) {
+  const btn = $("quiz-dismiss");
+  btn.disabled = true;
+  try {
+    await invoke("dismiss_weak_question", { setName, index: questionIndex });
+    btn.textContent = "✔ Won't show again";
+    refreshWeakBadge();
+  } catch (e) {
+    btn.disabled = false;
+    alert(String(e));
+  }
 }
 
 $("quiz-next").addEventListener("click", () => {
   quiz.index++;
-  if (quiz.index < quiz.set.questions.length) {
+  if (quiz.index < quiz.questions.length) {
     renderQuestion();
   } else {
     showResults();
@@ -653,27 +751,51 @@ $("quiz-next").addEventListener("click", () => {
 });
 
 async function showResults() {
-  const total = quiz.set.questions.length;
+  const total = quiz.questions.length;
   const pct = Math.round((quiz.correctCount / total) * 100);
   $("result-score").textContent = `${pct}%`;
-  $("result-detail").textContent = `You answered ${quiz.correctCount} of ${total} questions correctly on "${quiz.set.name}".`;
+  $("results-title").textContent =
+    quiz.mode === "review" ? "Review complete 🧠" : "Quiz complete 🎉";
+  $("result-detail").textContent =
+    quiz.mode === "review"
+      ? `You answered ${quiz.correctCount} of ${total} correctly in this review round.`
+      : `You answered ${quiz.correctCount} of ${total} questions correctly on "${quiz.title}".`;
   showView("results");
-  try {
-    const attempts = await invoke("record_attempt", {
-      name: quiz.set.name,
-      correct: quiz.correctCount,
-      total,
-    });
-    quiz.set.attempts = attempts;
-    renderQuizHistory();
-    refreshSets();
-  } catch (e) {
-    console.error("could not record attempt:", e);
+  if (quiz.mode === "normal") {
+    try {
+      const attempts = await invoke("record_attempt", {
+        name: quiz.set.name,
+        correct: quiz.correctCount,
+        total,
+        wrongIndices: quiz.wrongIndices,
+      });
+      quiz.set.attempts = attempts;
+      renderQuizHistory();
+      refreshSets();
+      refreshWeakBadge();
+    } catch (e) {
+      console.error("could not record attempt:", e);
+    }
   }
   await awardXp(Math.round(total * XP_PER_QUESTION));
 }
 
-$("result-retry").addEventListener("click", () => startQuiz(quiz.set));
+$("result-retry").addEventListener("click", async () => {
+  if (quiz.mode === "review") {
+    try {
+      const fresh = await invoke("get_weak_quiz");
+      if (fresh.length === 0) {
+        showView("weak-home");
+        return;
+      }
+      startReviewQuiz(fresh);
+    } catch (e) {
+      alert(String(e));
+    }
+  } else {
+    startQuiz(quiz.set);
+  }
+});
 $("result-home").addEventListener("click", () => showView("home"));
 
 // ---------- import from pasted text ----------
@@ -796,9 +918,25 @@ document.querySelectorAll(".nav-btn[data-view]").forEach((btn) => {
   });
 });
 
+// ---------- Strengthen Your Knowledge ----------
+
+async function refreshWeakBadge() {
+  try {
+    const summary = await invoke("weak_summary");
+    const total = summary.reduce((sum, s) => sum + s.count, 0);
+    $("weak-count-text").textContent =
+      total === 0
+        ? "No wrong answers yet"
+        : `${total} question${total === 1 ? "" : "s"} to review`;
+  } catch (e) {
+    console.error("could not load weak summary:", e);
+  }
+}
+
 // ---------- init ----------
 
 refreshSets();
+refreshWeakBadge();
 showView("home");
 autoSetup();
 loadProgress();

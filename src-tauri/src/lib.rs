@@ -41,6 +41,13 @@ struct QuestionSet {
     questions: Vec<Question>,
     #[serde(default)]
     attempts: Vec<Attempt>,
+    /// Indices into `questions` ever answered incorrectly. Append-only from
+    /// wrong answers (anywhere — a normal quiz or a review session); never
+    /// auto-removed on a correct answer. Only shrinks via an explicit
+    /// dismiss of one question or a full reset — this is a persistent
+    /// mistake log the user controls, not a self-healing queue.
+    #[serde(default)]
+    weak_questions: Vec<usize>,
 }
 
 #[derive(Serialize)]
@@ -51,6 +58,19 @@ struct SetSummary {
     question_count: usize,
     attempts: Vec<Attempt>,
     providers: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct WeakExamSummary {
+    exam: String,
+    count: usize,
+}
+
+#[derive(Serialize)]
+struct WeakQuestion {
+    set_name: String,
+    index: usize,
+    question: Question,
 }
 
 fn data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -1039,11 +1059,24 @@ async fn generate_quiz(
         ));
     }
 
-    // split the requested count across the selected models (they run in parallel)
+    // Split the requested count across the selected models (they run in
+    // parallel), asking each for a couple extra — weaker models occasionally
+    // produce a handful of entries that fail schema validation (wrong answer
+    // count, missing fields), and this buffer absorbs that without falling
+    // short of what the user asked for.
     let per = count.div_ceil(models.len());
+    let per_padded = per + 2;
     let tasks: Vec<_> = models
         .iter()
-        .map(|m| generate_with(app.clone(), m.clone(), exam.clone(), per, difficulty.clone()))
+        .map(|m| {
+            generate_with(
+                app.clone(),
+                m.clone(),
+                exam.clone(),
+                per_padded,
+                difficulty.clone(),
+            )
+        })
         .collect();
     let (abort_handle, abort_reg) = AbortHandle::new_pair();
     *state.0.lock().map_err(|e| e.to_string())? = Some(abort_handle);
@@ -1064,6 +1097,41 @@ async fn generate_quiz(
     if questions.is_empty() {
         return Err(format!("all models failed — {}", errors.join(" | ")));
     }
+
+    // Still short after the padding? Ask for the exact shortfall, a couple
+    // of tries, deduping against what we already have. Guarantees the
+    // requested count in all but the worst cases instead of silently
+    // handing back fewer questions than asked for.
+    if let Some(first_model) = models.first() {
+        for _ in 0..2 {
+            if questions.len() >= count {
+                break;
+            }
+            let shortfall = count - questions.len();
+            emit_gen_progress(
+                &app,
+                &format!("Generating {shortfall} more question(s) to reach {count}…"),
+            );
+            let (_, res) = generate_with(
+                app.clone(),
+                first_model.clone(),
+                exam.clone(),
+                shortfall + 2,
+                difficulty.clone(),
+            )
+            .await;
+            if let Ok(more) = res {
+                for q in more {
+                    if questions.len() >= count {
+                        break;
+                    }
+                    if !questions.iter().any(|existing| existing.question == q.question) {
+                        questions.push(q);
+                    }
+                }
+            }
+        }
+    }
     questions.truncate(count);
 
     let set = QuestionSet {
@@ -1073,6 +1141,7 @@ async fn generate_quiz(
         created_at: now_ms(),
         questions,
         attempts: Vec::new(),
+        weak_questions: Vec::new(),
     };
     save_set(&app, &set)?;
     Ok(set)
@@ -1084,6 +1153,7 @@ fn record_attempt(
     name: String,
     correct: usize,
     total: usize,
+    wrong_indices: Vec<usize>,
 ) -> Result<Vec<Attempt>, String> {
     let mut set = load_set(app.clone(), name)?;
     set.attempts.push(Attempt {
@@ -1091,8 +1161,114 @@ fn record_attempt(
         total,
         at: now_ms(),
     });
+    for i in wrong_indices {
+        if !set.weak_questions.contains(&i) {
+            set.weak_questions.push(i);
+        }
+    }
     save_set(&app, &set)?;
     Ok(set.attempts)
+}
+
+/// Every question ever marked wrong, across all sets that share an exam
+/// name, counted for the "Strengthen Your Knowledge" summary.
+#[tauri::command]
+fn weak_summary(app: tauri::AppHandle) -> Result<Vec<WeakExamSummary>, String> {
+    let dir = data_dir(&app)?.join("sets");
+    let mut counts: Vec<WeakExamSummary> = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(set) = serde_json::from_str::<QuestionSet>(&raw) else {
+            continue;
+        };
+        if set.weak_questions.is_empty() {
+            continue;
+        }
+        match counts.iter_mut().find(|c| c.exam == set.exam) {
+            Some(c) => c.count += set.weak_questions.len(),
+            None => counts.push(WeakExamSummary {
+                exam: set.exam.clone(),
+                count: set.weak_questions.len(),
+            }),
+        }
+    }
+    counts.sort_by(|a, b| b.count.cmp(&a.count));
+    Ok(counts)
+}
+
+/// Pool every weak question from every set sharing this exam name, keeping
+/// track of which set + index each came from so a dismiss can target it.
+#[tauri::command]
+fn get_weak_quiz(app: tauri::AppHandle) -> Result<Vec<WeakQuestion>, String> {
+    let dir = data_dir(&app)?.join("sets");
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(set) = serde_json::from_str::<QuestionSet>(&raw) else {
+            continue;
+        };
+        for &i in &set.weak_questions {
+            if let Some(q) = set.questions.get(i) {
+                out.push(WeakQuestion {
+                    set_name: set.name.clone(),
+                    index: i,
+                    question: q.clone(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// "Don't show this question again" — permanently removes one question from
+/// its set's weak-questions pool.
+#[tauri::command]
+fn dismiss_weak_question(
+    app: tauri::AppHandle,
+    set_name: String,
+    index: usize,
+) -> Result<(), String> {
+    let mut set = load_set(app.clone(), set_name)?;
+    set.weak_questions.retain(|&i| i != index);
+    save_set(&app, &set)
+}
+
+/// Full reset of the "Strengthen Your Knowledge" section — clears every
+/// set's weak-questions pool. The frontend confirms with the user before
+/// calling this; it takes effect immediately and cannot be undone.
+#[tauri::command]
+fn reset_weak_questions(app: tauri::AppHandle) -> Result<(), String> {
+    let dir = data_dir(&app)?.join("sets");
+    for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.path().extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let Ok(mut set) = serde_json::from_str::<QuestionSet>(&raw) else {
+            continue;
+        };
+        if set.weak_questions.is_empty() {
+            continue;
+        }
+        set.weak_questions.clear();
+        save_set(&app, &set)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1129,6 +1305,7 @@ fn import_quiz(
         created_at: now_ms(),
         questions,
         attempts: Vec::new(),
+        weak_questions: Vec::new(),
     };
     save_set(&app, &set)?;
     Ok(set)
@@ -1151,6 +1328,10 @@ pub fn run() {
             cancel_generation,
             import_quiz,
             record_attempt,
+            weak_summary,
+            get_weak_quiz,
+            dismiss_weak_question,
+            reset_weak_questions,
             local_ai_status,
             setup_local_ai,
             delete_model,

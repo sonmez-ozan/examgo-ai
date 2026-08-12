@@ -422,6 +422,44 @@ body::after {
   background: var(--red-bg);
 }
 
+/* ---------- "Strengthen Your Knowledge" sidebar box ---------- */
+.nav-btn.weak-box {
+  align-items: flex-start;
+  gap: 12px;
+  padding: 13px 14px;
+  border-radius: var(--radius);
+  border-color: rgba(31, 209, 201, 0.3);
+  background: linear-gradient(135deg, rgba(31, 209, 201, 0.1), rgba(56, 189, 248, 0.05));
+  box-shadow: 0 0 0 1px rgba(31, 209, 201, 0.06), 0 4px 16px rgba(31, 209, 201, 0.08);
+}
+.nav-btn.weak-box:hover {
+  border-color: var(--accent);
+  background: linear-gradient(135deg, rgba(31, 209, 201, 0.16), rgba(56, 189, 248, 0.08));
+  box-shadow: 0 0 0 1px rgba(31, 209, 201, 0.12), 0 6px 20px rgba(31, 209, 201, 0.14);
+}
+.nav-btn.weak-box .btn-icon {
+  width: 21px;
+  height: 21px;
+  margin-top: 1px;
+  color: var(--accent);
+}
+.weak-box-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.weak-box-title {
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text);
+}
+.weak-box-count {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
 .sidebar-footer {
   margin-top: auto;
   padding-top: 10px;
@@ -1133,13 +1171,22 @@ label.check input:focus-visible {
   gap: 20px;
   margin-bottom: 4px;
 }
+.quiz-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+.quiz-header-actions .btn-secondary {
+  padding: 7px 14px;
+  font-size: 13px;
+}
 .quiz-progress {
   font-size: 13px;
   font-weight: 600;
   color: var(--accent);
   white-space: nowrap;
   padding: 7px 14px;
-  margin-top: 4px;
   border: 1px solid rgba(31, 209, 201, 0.3);
   border-radius: 99px;
   background: var(--accent-soft);

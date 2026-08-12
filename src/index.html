@@ -64,6 +64,20 @@
         <div class="sidebar-section">My Question Sets</div>
         <div id="set-list"></div>
 
+        <button class="nav-btn weak-box" id="weak-nav-btn">
+          <span class="btn-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2a7 7 0 0 0-7 7c0 2.4 1.2 4 2.2 5.1.6.7 1 1.2 1 1.9v1a2 2 0 0 0 2 2h3.6a2 2 0 0 0 2-2v-1c0-.7.4-1.2 1-1.9C17.8 13 19 11.4 19 9a7 7 0 0 0-7-7z" />
+              <path d="M9.5 21h5" />
+              <path d="M10 18h4" />
+            </svg>
+          </span>
+          <span class="weak-box-text">
+            <span class="weak-box-title">Strengthen Your Knowledge</span>
+            <span class="weak-box-count" id="weak-count-text">No wrong answers yet</span>
+          </span>
+        </button>
+
         <div class="sidebar-footer">
           <button class="nav-btn icon-only" data-view="home" title="Home">
             <span class="btn-icon" aria-hidden="true">
@@ -308,7 +322,12 @@
               <h1 id="quiz-title"></h1>
               <p class="subtitle" id="quiz-exam"></p>
             </div>
-            <div class="quiz-progress" id="quiz-progress"></div>
+            <div class="quiz-header-actions">
+              <button id="quiz-reset-link" type="button" class="btn-secondary hidden">
+                Reset all
+              </button>
+              <div class="quiz-progress" id="quiz-progress"></div>
+            </div>
           </div>
           <div class="quiz-layout">
             <div class="card quiz-card">
@@ -316,10 +335,13 @@
               <div id="quiz-answers"></div>
               <div id="quiz-explanations" class="hidden"></div>
               <div class="quiz-actions">
+                <button id="quiz-dismiss" type="button" class="btn-secondary hidden">
+                  Don't show this question again
+                </button>
                 <button id="quiz-next" class="btn-primary hidden">Next question →</button>
               </div>
             </div>
-            <aside class="card history-panel">
+            <aside class="card history-panel" id="quiz-history-panel">
               <h2>Attempt history</h2>
               <div id="quiz-history-list"></div>
             </aside>
@@ -328,7 +350,7 @@
 
         <!-- Results view -->
         <section id="view-results" class="view hidden">
-          <h1>Quiz complete 🎉</h1>
+          <h1 id="results-title">Quiz complete 🎉</h1>
           <div class="card center">
             <div id="result-score" class="score"></div>
             <p id="result-detail"></p>
@@ -336,6 +358,17 @@
               <button id="result-retry" class="btn-primary">Retry this set</button>
               <button id="result-home" class="btn-secondary">Back to sets</button>
             </div>
+          </div>
+        </section>
+
+        <!-- Strengthen Your Knowledge view -->
+        <section id="view-weak-home" class="view hidden">
+          <h1>Strengthen Your Knowledge</h1>
+          <div class="card center">
+            <p class="hint">
+              No wrong answers yet — once you miss a question anywhere, it
+              shows up here so you can review it.
+            </p>
           </div>
         </section>
 
